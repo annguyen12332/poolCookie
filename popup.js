@@ -27,9 +27,29 @@ document.addEventListener('DOMContentLoaded', () => {
         const div = document.createElement('div');
         div.innerHTML = `
           <input type="checkbox" id="cookie_${index}" name="cookie" value="${index}">
-          <label for="cookie_${index}">Cookie ${index + 1} - ${cookie.domain}</label>
+          <label for="cookie_${index}" id="label_${index}" class="cookie-label">${cookie.customName || `Cookie ${index + 1} - ${cookie.domain}`}</label>
+          <button class="rename-btn" data-index="${index}">rename</button>
         `;
         cookieListContainer.appendChild(div);
+      });
+
+      // Add rename event listeners
+      document.querySelectorAll('.rename-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const index = parseInt(btn.getAttribute('data-index'));
+          const label = document.getElementById(`label_${index}`);
+          const currentName = label.textContent;
+          const newName = prompt('Enter new name for this cookie:', currentName);
+          if (newName && newName.trim() !== '') {
+            chrome.storage.local.get(['cookies'], (result) => {
+              const cookies = result.cookies;
+              cookies[index].customName = newName.trim();
+              chrome.storage.local.set({ cookies: cookies }, () => {
+                updateCookieList(domainFilter.value);
+              });
+            });
+          }
+        });
       });
     });
   }
