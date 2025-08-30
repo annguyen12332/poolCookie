@@ -9,6 +9,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const cookieListContainer = document.getElementById('cookieListContainer');
   const domainFilter = document.getElementById('domainFilter');
 
+  // Generate unique key for new cookies
+  function generateUniqueKey() {
+    return 'cookie_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  }
+
   // Load saved cookies and update lists
   function updateCookieList(selectedDomain = 'All') {
     chrome.storage.local.get(['cookies'], (result) => {
@@ -27,15 +32,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const filteredCookies = selectedDomain === 'All' ? cookies : cookies.filter(c => c.domain === selectedDomain);
       cookieListContainer.innerHTML = '';
-      filteredCookies.forEach((cookie, index) => {
+      filteredCookies.forEach((cookie, displayIndex) => {
         const div = document.createElement('div');
         div.className = 'cookie-item';
         div.innerHTML = `
-          <input type="checkbox" id="cookie_${index}" name="cookie" value="${index}">
-          <label for="cookie_${index}" id="label_${index}" class="cookie-label">
-            ${cookie.customName || `Cookie ${index + 1} - ${cookie.domain}`}
+          <input type="checkbox" id="cookie_${cookie.key}" name="cookie" value="${cookie.key}">
+          <label for="cookie_${cookie.key}" id="label_${cookie.key}" class="cookie-label">
+            ${cookie.customName || `Cookie ${displayIndex + 1} - ${cookie.domain}`}
           </label>
-          <button class="rename-btn" data-index="${index}">Rename</button>
+          <button class="rename-btn" data-key="${cookie.key}">Rename</button>
         `;
         cookieListContainer.appendChild(div);
       });
@@ -43,17 +48,20 @@ document.addEventListener('DOMContentLoaded', () => {
       // Add rename event listeners
       document.querySelectorAll('.rename-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-          const index = parseInt(btn.getAttribute('data-index'));
-          const label = document.getElementById(`label_${index}`);
+          const key = btn.getAttribute('data-key');
+          const label = document.getElementById(`label_${key}`);
           const currentName = label.textContent.trim();
           const newName = prompt('Enter new name for this cookie:', currentName);
           if (newName && newName.trim() !== '') {
             chrome.storage.local.get(['cookies'], (result) => {
               const cookies = result.cookies;
-              cookies[index].customName = newName.trim();
-              chrome.storage.local.set({ cookies: cookies }, () => {
-                updateCookieList(domainFilter.value);
-              });
+              const cookieIndex = cookies.findIndex(c => c.key === key);
+              if (cookieIndex !== -1) {
+                cookies[cookieIndex].customName = newName.trim();
+                chrome.storage.local.set({ cookies: cookies }, () => {
+                  updateCookieList(domainFilter.value);
+                });
+              }
             });
           }
         });
@@ -92,6 +100,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chrome.storage.local.get(['cookies'], (result) => {
           const savedCookies = result.cookies || [];
           const newCookie = {
+            key: generateUniqueKey(), // Add unique key
             domain: new URL(url).hostname,
             cookies: cookies,
             timestamp: new Date().toISOString()
@@ -106,18 +115,26 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Download cookies as JSON
+  // Download cookies as separate JSON files
   downloadButton.addEventListener('click', () => {
     chrome.storage.local.get(['cookies'], (result) => {
       const cookies = result.cookies || [];
-      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(cookies, null, 2));
-      const downloadAnchor = document.createElement('a');
-      downloadAnchor.setAttribute('href', dataStr);
-      downloadAnchor.setAttribute('download', `cookies_${new Date().toISOString().split('T')[0]}.json`);
-      document.body.appendChild(downloadAnchor);
-      downloadAnchor.click();
-      document.body.removeChild(downloadAnchor);
-      alert('Cookies downloaded as JSON file!');
+      if (cookies.length === 0) {
+        alert('No cookies to download!');
+        return;
+      }
+      const dateStr = new Date().toISOString().split('T')[0];
+      cookies.forEach((cookie, index) => {
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify([cookie], null, 2));
+        const filename = `${cookie.customName ? cookie.customName.replace(/\s/g, '_') : `cookie_${index + 1}`}_${cookie.domain}_${dateStr}.json`;
+        const downloadAnchor = document.createElement('a');
+        downloadAnchor.setAttribute('href', dataStr);
+        downloadAnchor.setAttribute('download', filename);
+        document.body.appendChild(downloadAnchor);
+        downloadAnchor.click();
+        document.body.removeChild(downloadAnchor);
+      });
+      alert('Cookies downloaded as separate JSON files!');
     });
   });
 
@@ -151,17 +168,25 @@ document.addEventListener('DOMContentLoaded', () => {
             alert(`Invalid JSON format in file: ${file.name}`);
             return;
           }
-          // Validate cookie format
-          const isValid = importedCookies.every(cookie => 
-            cookie.domain && typeof cookie.domain === 'string' &&
-            cookie.cookies && Array.isArray(cookie.cookies) &&
-            cookie.timestamp && typeof cookie.timestamp === 'string'
-          );
-          if (!isValid) {
-            alert(`Invalid cookie data in file: ${file.name}`);
-            return;
-          }
-          allImportedCookies.push(...importedCookies);
+          
+          // Validate cookie format and add keys if missing
+          const processedCookies = importedCookies.map(cookie => {
+            // Validate required fields
+            if (!cookie.domain || typeof cookie.domain !== 'string' ||
+                !cookie.cookies || !Array.isArray(cookie.cookies) ||
+                !cookie.timestamp || typeof cookie.timestamp !== 'string') {
+              throw new Error('Invalid cookie data structure');
+            }
+            
+            // Add unique key if missing (for backward compatibility)
+            if (!cookie.key) {
+              cookie.key = generateUniqueKey();
+            }
+            
+            return cookie;
+          });
+          
+          allImportedCookies.push(...processedCookies);
           filesProcessed++;
 
           // When all files are processed, update storage
@@ -201,32 +226,35 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.local.get(['cookies'], (result) => {
       const cookies = result.cookies;
       checkboxes.forEach(checkbox => {
-        const index = parseInt(checkbox.value);
-        const selectedCookies = cookies[index].cookies;
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          const url = tabs[0].url;
-          selectedCookies.forEach((cookie) => {
-            const newCookie = {
-              url: url,
-              name: cookie.name,
-              value: cookie.value,
-              domain: cookie.domain,
-              path: cookie.path,
-              secure: cookie.secure,
-              httpOnly: cookie.httpOnly,
-              expirationDate: cookie.expirationDate
-            };
-            chrome.cookies.set(newCookie, () => {
-              if (chrome.runtime.lastError) {
-                console.error('Error setting cookie:', chrome.runtime.lastError.message);
-              }
+        const key = checkbox.value;
+        const selectedCookie = cookies.find(c => c.key === key);
+        if (selectedCookie) {
+          const selectedCookies = selectedCookie.cookies;
+          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const url = tabs[0].url;
+            selectedCookies.forEach((cookie) => {
+              const newCookie = {
+                url: url,
+                name: cookie.name,
+                value: cookie.value,
+                domain: cookie.domain,
+                path: cookie.path,
+                secure: cookie.secure,
+                httpOnly: cookie.httpOnly,
+                expirationDate: cookie.expirationDate
+              };
+              chrome.cookies.set(newCookie, () => {
+                if (chrome.runtime.lastError) {
+                  console.error('Error setting cookie:', chrome.runtime.lastError.message);
+                }
+              });
+            });
+            chrome.scripting.executeScript({
+              target: { tabId: tabs[0].id },
+              function: () => window.location.reload()
             });
           });
-          chrome.scripting.executeScript({
-            target: { tabId: tabs[0].id },
-            function: () => window.location.reload()
-          });
-        });
+        }
       });
     });
   });
@@ -238,8 +266,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (confirm('Are you sure you want to clear the selected cookies?')) {
         chrome.storage.local.get(['cookies'], (result) => {
           let cookies = result.cookies || [];
-          const indicesToRemove = Array.from(checkboxes).map(cb => parseInt(cb.value));
-          cookies = cookies.filter((_, index) => !indicesToRemove.includes(index));
+          const keysToRemove = Array.from(checkboxes).map(cb => cb.value);
+          // Filter out cookies with keys that should be removed
+          cookies = cookies.filter(cookie => !keysToRemove.includes(cookie.key));
           chrome.storage.local.set({ cookies: cookies }, () => {
             updateCookieList(domainFilter.value);
             alert('Selected cookies cleared!');
@@ -256,6 +285,24 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Initial load
-  updateCookieList();
+  // Migrate existing cookies to add keys (backward compatibility)
+  chrome.storage.local.get(['cookies'], (result) => {
+    const cookies = result.cookies || [];
+    let needsMigration = false;
+    
+    cookies.forEach(cookie => {
+      if (!cookie.key) {
+        cookie.key = generateUniqueKey();
+        needsMigration = true;
+      }
+    });
+    
+    if (needsMigration) {
+      chrome.storage.local.set({ cookies: cookies }, () => {
+        updateCookieList();
+      });
+    } else {
+      updateCookieList();
+    }
+  });
 });
